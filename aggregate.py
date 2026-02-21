@@ -36,8 +36,10 @@ def aggregate_day(supabase, target_date: date):
         if r.get("presence") == "active":
             by_user[uid]["active_count"] += 1
 
+    actual_poll_interval = POLL_SECONDS + (len(by_user) * 3.5) if by_user else POLL_SECONDS
+
     for uid, data in by_user.items():
-        total_seconds = data["active_count"] * POLL_SECONDS
+        total_seconds = int(data["active_count"] * actual_poll_interval)
         try:
             supabase.table("daily_uptime").upsert({
                 "user_id": uid,

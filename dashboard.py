@@ -41,14 +41,17 @@ def get_supabase():
 
 
 def format_duration(seconds: int) -> str:
-    """Format seconds as readable string (e.g. 2h 30m)."""
+    """Format seconds as readable string (e.g. 2h 30m 15s)."""
     if seconds <= 0:
-        return "0m"
+        return "0s"
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
     if hours > 0:
-        return f"{hours}h {minutes}m"
-    return f"{minutes}m"
+        return f"{hours}h {minutes}m {secs}s"
+    elif minutes > 0:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -103,12 +106,13 @@ async def index(
                 by_user[uid] = {"user_email": s.get("user_email"), "user_name": s.get("user_name"), "count": 0}
             if s.get("presence") == "active":
                 by_user[uid]["count"] += 1
+        actual_poll_interval = POLL_SECONDS + (len(by_user) * 3.5) if by_user else POLL_SECONDS
         rows = [
             {
                 "user_id": uid,
                 "user_email": data["user_email"],
                 "user_name": data["user_name"],
-                "total_seconds_online": data["count"] * POLL_SECONDS,
+                "total_seconds_online": int(data["count"] * actual_poll_interval),
             }
             for uid, data in by_user.items()
         ]
@@ -190,12 +194,13 @@ async def api_uptime(
                 by_user[uid] = {"user_email": s.get("user_email"), "user_name": s.get("user_name"), "count": 0}
             if s.get("presence") == "active":
                 by_user[uid]["count"] += 1
+        actual_poll_interval = POLL_SECONDS + (len(by_user) * 3.5) if by_user else POLL_SECONDS
         rows = [
             {
                 "user_id": uid,
                 "user_email": data["user_email"],
                 "user_name": data["user_name"],
-                "total_seconds_online": data["count"] * POLL_SECONDS,
+                "total_seconds_online": int(data["count"] * actual_poll_interval),
             }
             for uid, data in by_user.items()
         ]
