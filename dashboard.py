@@ -3,10 +3,16 @@ Basic dashboard for Slack user uptime.
 Shows user email/name and total online time per date, with search.
 """
 from datetime import date, datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Request, Query
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pathlib import Path
+
+IST = ZoneInfo("Asia/Kolkata")
+
+def get_ist_today() -> date:
+    return datetime.now(IST).date()
 
 from config import SUPABASE_URL, SUPABASE_SERVICE_KEY, POLL_SECONDS
 
@@ -51,7 +57,7 @@ async def index(
     q: str = Query(default="", description="Search user by name or email"),
     d: str = Query(default=None, description="Date (YYYY-MM-DD)"),
 ):
-    target_date = date.today()
+    target_date = get_ist_today()
     if d:
         try:
             target_date = date.fromisoformat(d)
@@ -68,13 +74,21 @@ async def index(
     supabase = get_supabase()
 
     # Prefer daily_uptime; fallback to computing from presence_snapshots
-    start = datetime.combine(target_date, datetime.min.time(), tzinfo=timezone.utc)
-    end = start + timedelta(days=1)
+    start = datetime.combine(target_date, datetime.min.time(), tzinfo=IST)
+    if _start_time and target_date == get_ist_today():
+        # Start counting online time from when the server started
+        start = max(start, _start_time)
+        
+    end = datetime.combine(target_date, datetime.min.time(), tzinfo=IST) + timedelta(days=1)
     start_str = start.isoformat()
     end_str = end.isoformat()
 
-    resp = supabase.table("daily_uptime").select("*").eq("date", target_date.isoformat()).execute()
-    rows = resp.data or []
+    # Skip daily_uptime if it's today and we want to start from server start time
+    if _start_time and target_date == get_ist_today():
+        rows = []
+    else:
+        resp = supabase.table("daily_uptime").select("*").eq("date", target_date.isoformat()).execute()
+        rows = resp.data or []
 
     if not rows:
         # Compute from presence_snapshots
@@ -139,7 +153,7 @@ async def api_uptime(
     q: str = Query(default=""),
 ):
     """JSON API for uptime data."""
-    target_date = date.today()
+    target_date = get_ist_today()
     if d:
         try:
             target_date = date.fromisoformat(d)
@@ -150,13 +164,19 @@ async def api_uptime(
         return {"error": "Supabase not configured", "users": []}
 
     supabase = get_supabase()
-    start = datetime.combine(target_date, datetime.min.time(), tzinfo=timezone.utc)
-    end = start + timedelta(days=1)
+    start = datetime.combine(target_date, datetime.min.time(), tzinfo=IST)
+    if _start_time and target_date == get_ist_today():
+        start = max(start, _start_time)
+        
+    end = datetime.combine(target_date, datetime.min.time(), tzinfo=IST) + timedelta(days=1)
     start_str = start.isoformat()
     end_str = end.isoformat()
 
-    resp = supabase.table("daily_uptime").select("*").eq("date", target_date.isoformat()).execute()
-    rows = resp.data or []
+    if _start_time and target_date == get_ist_today():
+        rows = []
+    else:
+        resp = supabase.table("daily_uptime").select("*").eq("date", target_date.isoformat()).execute()
+        rows = resp.data or []
 
     if not rows:
         snap_resp = supabase.table("presence_snapshots").select("*").gte(

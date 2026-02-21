@@ -1,29 +1,107 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Slack Uptime</title>
     <style>
-        * { box-sizing: border-box; }
-        body { font-family: system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 1.5rem; position: relative; }
-        h1 { margin-top: 0; }
-        .script-uptime { position: fixed; top: 1rem; right: 1rem; background: #4a154b; color: white; padding: 0.4rem 0.8rem; border-radius: 6px; font-size: 0.9rem; font-variant-numeric: tabular-nums; }
-        .bar { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.5rem; }
-        input[type="search"], input[type="date"] { padding: 0.5rem 0.75rem; border: 1px solid #ccc; border-radius: 6px; font-size: 1rem; }
-        input[type="search"] { flex: 1; min-width: 180px; }
-        button { padding: 0.5rem 1rem; background: #4a154b; color: white; border: none; border-radius: 6px; cursor: pointer; }
-        button:hover { background: #611f69; }
-        table { width: 100%; border-collapse: collapse; }
-        th, td { padding: 0.6rem 0.8rem; text-align: left; border-bottom: 1px solid #eee; }
-        th { background: #f8f8f8; font-weight: 600; }
-        .time { font-variant-numeric: tabular-nums; }
-        .error { color: #c00; }
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: system-ui, sans-serif;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 1.5rem;
+            position: relative;
+        }
+
+        h1 {
+            margin-top: 0;
+        }
+
+        .script-uptime {
+            position: fixed;
+            top: 1rem;
+            right: 1rem;
+            background: #4a154b;
+            color: white;
+            padding: 0.4rem 0.8rem;
+            border-radius: 6px;
+            font-size: 0.9rem;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .bar {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+            margin-bottom: 1.5rem;
+        }
+
+        input[type="search"],
+        input[type="date"] {
+            padding: 0.5rem 0.75rem;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            font-size: 1rem;
+        }
+
+        input[type="search"] {
+            flex: 1;
+            min-width: 180px;
+        }
+
+        button {
+            padding: 0.5rem 1rem;
+            background: #4a154b;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: #611f69;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th,
+        td {
+            padding: 0.6rem 0.8rem;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }
+
+        th {
+            background: #f8f8f8;
+            font-weight: 600;
+        }
+
+        .time {
+            font-variant-numeric: tabular-nums;
+        }
+
+        .error {
+            color: #c00;
+        }
     </style>
 </head>
+
 <body>
     <div class="script-uptime" id="uptimeCounter">Script uptime: {{ script_uptime_hrs }} hrs</div>
-    <h1>Slack Uptime</h1>
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+        <h1 style="margin: 0;">Slack Uptime</h1>
+        <div id="liveClock"
+            style="font-size: 1.2rem; font-weight: 700; color: #4a154b; background: #f8f8f8; padding: 0.5rem 1rem; border-radius: 8px; border: 1px solid #ddd; font-variant-numeric: tabular-nums;">
+        </div>
+    </div>
     <form class="bar" id="searchForm" method="get">
         <input type="search" name="q" id="searchInput" value="{{ search }}" placeholder="Search by name or email...">
         <input type="date" name="d" id="dateInput" value="{{ date.isoformat() }}">
@@ -50,7 +128,9 @@
                 <td class="time">{{ u.formatted }}</td>
             </tr>
             {% else %}
-            <tr><td colspan="2">No data for this date.</td></tr>
+            <tr>
+                <td colspan="2">No data for this date.</td>
+            </tr>
             {% endfor %}
         </tbody>
     </table>
@@ -61,7 +141,16 @@
         const userTableBody = document.getElementById('userTableBody');
         const uptimeCounter = document.getElementById('uptimeCounter');
         const searchForm = document.getElementById('searchForm');
-        
+
+        function updateLiveClock() {
+            const clockEl = document.getElementById('liveClock');
+            if (clockEl) {
+                clockEl.textContent = new Date().toLocaleTimeString('en-US', { timeZone: 'Asia/Kolkata', hour12: true, hour: 'numeric', minute: '2-digit', second: '2-digit' }) + ' IST';
+            }
+        }
+        setInterval(updateLiveClock, 1000);
+        updateLiveClock();
+
         let scriptStartTime = null;
         {% if script_start_time %}
         scriptStartTime = "{{ script_start_time }}";
@@ -76,7 +165,7 @@
             const hours = Math.floor(diffSeconds / 3600);
             const minutes = Math.floor((diffSeconds % 3600) / 60);
             const seconds = diffSeconds % 60;
-            
+
             let timeStr = '';
             if (hours > 0) {
                 timeStr = `${hours}h ${minutes}m ${seconds}s`;
@@ -87,7 +176,7 @@
             }
             uptimeCounter.textContent = `Script uptime: ${timeStr}`;
         }
-        
+
         // Update uptime counter every second
         setInterval(updateUptimeCounter, 1000);
         updateUptimeCounter();
@@ -98,7 +187,7 @@
             try {
                 const res = await fetch(`/api/uptime?q=${q}&d=${d}`);
                 const data = await res.json();
-                
+
                 if (data.error) {
                     console.error('Server error:', data.error);
                     return;
@@ -106,6 +195,26 @@
 
                 if (data.script_start_time) {
                     scriptStartTime = data.script_start_time;
+                }
+
+                // If user hasn't explicitly set a date, ensure it auto-advances if a new day starts locally
+                if (!dateInput.value || dateInput.dataset.autoUpdating === "true") {
+                    const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+                    if (dateInput.value !== todayStr) {
+                        dateInput.value = todayStr;
+                    }
+                    dateInput.dataset.autoUpdating = "true";
+                }
+
+                if (data.date) {
+                    // Update header text based on API response
+                    const dateObj = new Date(data.date);
+                    // Handle timezone offset to ensure exact date displays
+                    const userTimezoneOffset = dateObj.getTimezoneOffset() * 60000;
+                    const accurateDate = new Date(dateObj.getTime() + userTimezoneOffset);
+
+                    const options = { month: 'long', day: 'numeric', year: 'numeric' };
+                    document.getElementById('dateDisplay').textContent = accurateDate.toLocaleDateString('en-US', options);
                 }
 
                 userTableBody.innerHTML = '';
@@ -141,10 +250,18 @@
             debounceTimer = setTimeout(() => fetchUptimeData(), 400);
         });
 
-        dateInput.addEventListener('change', fetchUptimeData);
+        dateInput.addEventListener('change', () => {
+            // Unset auto-updating flag when user manually picks a date
+            dateInput.dataset.autoUpdating = "false";
+            fetchUptimeData();
+        });
+
+        // Initialize flag on load
+        dateInput.dataset.autoUpdating = "true";
 
         // Auto-refresh data every 30 seconds
         setInterval(fetchUptimeData, 30000);
     </script>
 </body>
+
 </html>
