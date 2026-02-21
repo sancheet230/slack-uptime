@@ -1,1 +1,7 @@
-def format_duration_hours_minutes(seconds):\n    hours = seconds // 3600\n    minutes = (seconds % 3600) // 60\n    return f"{hours} hour(s) and {minutes} minute(s)"\n\n\ndef index(duration):\n    formatted_duration = format_duration_hours_minutes(duration)\n    # rest of the index function code, using formatted_duration as needed\n    return formatted_duration\n
+def format_duration_hours_minutes(duration):
+    """Convert a duration in seconds to a string formatted as "HH:MM"."""
+    hours, remainder = divmod(duration, 3600)
+    minutes, _ = divmod(remainder, 60)
+    return f"{int(hours):02}:{int(minutes):02}"
+
+# Additional logic and functions in dashboard.py can go here.
