@@ -1,7 +1,16 @@
 def format_duration_hours_minutes(duration):
-    """Convert a duration in seconds to a string formatted as "HH:MM"."""
-    hours, remainder = divmod(duration, 3600)
-    minutes, _ = divmod(remainder, 60)
-    return f"{int(hours):02}:{int(minutes):02}"
+    hours = duration // 3600
+    minutes = (duration % 3600) // 60
+    return f'{hours}h {minutes}m'  
 
-# Additional logic and functions in dashboard.py can go here.
+# Existing logic and imports here  
+
+# Example of existing code that calls format_duration_hours function
+
+
+def some_other_function():
+    duration = 9000  # Example duration in seconds
+    formatted_duration = format_duration_hours_minutes(duration)
+    print(formatted_duration)  # This should now print '2h 30m' for 9000 seconds
+
+# The rest of the existing logic remains unchanged
