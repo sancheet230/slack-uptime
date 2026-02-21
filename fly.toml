@@ -7,15 +7,15 @@ app = "slack-uptime"
   dockerfile = "Dockerfile"
 
 [env]
-  PORT = "8000"
+  PORT = "8080"
 
 [http_service]
-  internal_port = 8000
+  internal_port = 8080
   force_https = true
 
   [[http_service.checks]]
     interval = "30s"
-    timeout = "5s"
-    grace_period = "15s"
+    timeout = "10s"
+    grace_period = "60s"
     path = "/health"
     method = "get"
