@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Slack Uptime</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 1.5rem; position: relative; }
+        h1 { margin-top: 0; }
+        .script-uptime { position: fixed; top: 1rem; right: 1rem; background: #4a154b; color: white; padding: 0.4rem 0.8rem; border-radius: 6px; font-size: 0.9rem; font-variant-numeric: tabular-nums; }
+        .bar { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.5rem; }
+        input[type="search"], input[type="date"] { padding: 0.5rem 0.75rem; border: 1px solid #ccc; border-radius: 6px; font-size: 1rem; }
+        input[type="search"] { flex: 1; min-width: 180px; }
+        button { padding: 0.5rem 1rem; background: #4a154b; color: white; border: none; border-radius: 6px; cursor: pointer; }
+        button:hover { background: #611f69; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 0.6rem 0.8rem; text-align: left; border-bottom: 1px solid #eee; }
+        th { background: #f8f8f8; font-weight: 600; }
+        .time { font-variant-numeric: tabular-nums; }
+        .error { color: #c00; }
+    </style>
+</head>
+<body>
+    <div class="script-uptime">Script uptime: {{ script_uptime_hrs }} hrs</div>
+    <h1>Slack Uptime</h1>
+    <form class="bar" method="get">
+        <input type="search" name="q" value="{{ search }}" placeholder="Search by name or email...">
+        <input type="date" name="d" value="{{ date.isoformat() }}">
+        <button type="submit">Update</button>
+    </form>
+
+    {% if error %}
+    <p class="error">{{ error }}</p>
+    {% endif %}
+
+    <p>Uptime for <strong>{{ date.strftime('%B %d, %Y') }}</strong></p>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Name / Email</th>
+                <th>Total Online Time (hrs)</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for u in users %}
+            <tr>
+                <td>{{ u.name }}<br><small style="color:#666">{{ u.email }}</small></td>
+                <td class="time">{{ u.formatted }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="2">No data for this date.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</body>
+</html>

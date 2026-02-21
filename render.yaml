@@ -1,0 +1,34 @@
+# Render free tier deployment - connect GitHub repo at render.com
+# Dashboard + Poller run as separate services (poller stays active 24/7)
+
+services:
+  - type: web
+    name: slack-uptime-dashboard
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn dashboard:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: SLACK_BOT_TOKEN
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: POLL_SECONDS
+        value: 60
+    healthCheckPath: /health
+
+  - type: worker
+    name: slack-uptime-poller
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python poller.py
+    envVars:
+      - key: SLACK_BOT_TOKEN
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: POLL_SECONDS
+        value: 60
