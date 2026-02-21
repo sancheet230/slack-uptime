@@ -22,11 +22,11 @@
     </style>
 </head>
 <body>
-    <div class="script-uptime">Script uptime: {{ script_uptime_hrs }} hrs</div>
+    <div class="script-uptime" id="uptimeCounter">Script uptime: {{ script_uptime_hrs }} hrs</div>
     <h1>Slack Uptime</h1>
-    <form class="bar" method="get">
-        <input type="search" name="q" value="{{ search }}" placeholder="Search by name or email...">
-        <input type="date" name="d" value="{{ date.isoformat() }}">
+    <form class="bar" id="searchForm" method="get">
+        <input type="search" name="q" id="searchInput" value="{{ search }}" placeholder="Search by name or email...">
+        <input type="date" name="d" id="dateInput" value="{{ date.isoformat() }}">
         <button type="submit">Update</button>
     </form>
 
@@ -34,16 +34,16 @@
     <p class="error">{{ error }}</p>
     {% endif %}
 
-    <p>Uptime for <strong>{{ date.strftime('%B %d, %Y') }}</strong></p>
+    <p>Uptime for <strong id="dateDisplay">{{ date.strftime('%B %d, %Y') }}</strong></p>
 
     <table>
         <thead>
             <tr>
                 <th>Name / Email</th>
-                <th>Total Online Time (hrs)</th>
+                <th>Total Online Time</th>
             </tr>
         </thead>
-        <tbody>
+        <tbody id="userTableBody">
             {% for u in users %}
             <tr>
                 <td>{{ u.name }}<br><small style="color:#666">{{ u.email }}</small></td>
@@ -54,5 +54,97 @@
             {% endfor %}
         </tbody>
     </table>
+
+    <script>
+        const searchInput = document.getElementById('searchInput');
+        const dateInput = document.getElementById('dateInput');
+        const userTableBody = document.getElementById('userTableBody');
+        const uptimeCounter = document.getElementById('uptimeCounter');
+        const searchForm = document.getElementById('searchForm');
+        
+        let scriptStartTime = null;
+        {% if script_start_time %}
+        scriptStartTime = "{{ script_start_time }}";
+        {% endif %}
+
+        function updateUptimeCounter() {
+            if (!scriptStartTime) return;
+            const now = new Date();
+            const start = new Date(scriptStartTime);
+            const diffSeconds = Math.floor((now - start) / 1000);
+            if (diffSeconds < 0) return;
+            const hours = Math.floor(diffSeconds / 3600);
+            const minutes = Math.floor((diffSeconds % 3600) / 60);
+            const seconds = diffSeconds % 60;
+            
+            let timeStr = '';
+            if (hours > 0) {
+                timeStr = `${hours}h ${minutes}m ${seconds}s`;
+            } else if (minutes > 0) {
+                timeStr = `${minutes}m ${seconds}s`;
+            } else {
+                timeStr = `${seconds}s`;
+            }
+            uptimeCounter.textContent = `Script uptime: ${timeStr}`;
+        }
+        
+        // Update uptime counter every second
+        setInterval(updateUptimeCounter, 1000);
+        updateUptimeCounter();
+
+        async function fetchUptimeData() {
+            const q = encodeURIComponent(searchInput.value || '');
+            const d = encodeURIComponent(dateInput.value || '');
+            try {
+                const res = await fetch(`/api/uptime?q=${q}&d=${d}`);
+                const data = await res.json();
+                
+                if (data.error) {
+                    console.error('Server error:', data.error);
+                    return;
+                }
+
+                if (data.script_start_time) {
+                    scriptStartTime = data.script_start_time;
+                }
+
+                userTableBody.innerHTML = '';
+                if (data.users && data.users.length > 0) {
+                    data.users.forEach(u => {
+                        const tr = document.createElement('tr');
+                        const tdName = document.createElement('td');
+                        tdName.innerHTML = `${u.name || '(no name)'}<br><small style="color:#666">${u.email || '(no email)'}</small>`;
+                        const tdTime = document.createElement('td');
+                        tdTime.className = 'time';
+                        tdTime.textContent = u.formatted;
+                        tr.appendChild(tdName);
+                        tr.appendChild(tdTime);
+                        userTableBody.appendChild(tr);
+                    });
+                } else {
+                    userTableBody.innerHTML = '<tr><td colspan="2">No data for this date.</td></tr>';
+                }
+
+            } catch (e) {
+                console.error('Fetch error:', e);
+            }
+        }
+
+        searchForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            fetchUptimeData();
+        });
+
+        let debounceTimer;
+        searchInput.addEventListener('input', () => {
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => fetchUptimeData(), 400);
+        });
+
+        dateInput.addEventListener('change', fetchUptimeData);
+
+        // Auto-refresh data every 30 seconds
+        setInterval(fetchUptimeData, 30000);
+    </script>
 </body>
 </html>

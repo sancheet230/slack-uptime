@@ -34,12 +34,15 @@ def get_supabase():
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 
-def format_duration_hours(seconds: int) -> str:
-    """Format seconds as hours only (e.g. 2.5 hrs)."""
-    if seconds < 0:
-        return "0 hrs"
-    hours = round(seconds / 3600, 1)
-    return f"{hours} hrs"
+def format_duration(seconds: int) -> str:
+    """Format seconds as readable string (e.g. 2h 30m)."""
+    if seconds <= 0:
+        return "0m"
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    if hours > 0:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -110,7 +113,7 @@ async def index(
             "email": r.get("user_email") or "(no email)",
             "name": r.get("user_name") or "(no name)",
             "seconds": r.get("total_seconds_online", 0),
-            "formatted": format_duration_hours(r.get("total_seconds_online", 0)),
+            "formatted": format_duration(r.get("total_seconds_online", 0)),
         }
         for r in rows
     ]
@@ -118,13 +121,15 @@ async def index(
 
     # Script uptime in hours (how long the app has been running)
     script_uptime_hrs = 0
+    start_time_iso = None
     if _start_time:
         elapsed = (datetime.now(timezone.utc) - _start_time).total_seconds()
         script_uptime_hrs = round(elapsed / 3600, 1)
+        start_time_iso = _start_time.isoformat()
 
     return templates.TemplateResponse(
         "dashboard.html",
-        {"request": request, "users": users, "date": target_date, "search": q, "script_uptime_hrs": script_uptime_hrs},
+        {"request": request, "users": users, "date": target_date, "search": q, "script_uptime_hrs": script_uptime_hrs, "script_start_time": start_time_iso},
     )
 
 
@@ -183,13 +188,23 @@ async def api_uptime(
             or (r.get("user_name") or "").lower().find(ql) >= 0
         ]
 
+    script_uptime_hrs = 0
+    start_time_iso = None
+    if _start_time:
+        elapsed = (datetime.now(timezone.utc) - _start_time).total_seconds()
+        script_uptime_hrs = round(elapsed / 3600, 1)
+        start_time_iso = _start_time.isoformat()
+
     return {
         "date": target_date.isoformat(),
+        "script_uptime_hrs": script_uptime_hrs,
+        "script_start_time": start_time_iso,
         "users": [
             {
                 "email": r.get("user_email"),
                 "name": r.get("user_name"),
                 "total_seconds_online": r.get("total_seconds_online", 0),
+                "formatted": format_duration(r.get("total_seconds_online", 0)),
             }
             for r in rows
         ],
