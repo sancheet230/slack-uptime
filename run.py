@@ -30,7 +30,7 @@ def run_aggregator():
 
 
 def run_dashboard():
-    port = int(os.getenv("PORT", "8080"))
+    port = int(os.getenv("PORT", "8000"))
     uvicorn.run("dashboard:app", host="0.0.0.0", port=port)
 
 
