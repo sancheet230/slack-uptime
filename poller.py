@@ -41,6 +41,8 @@ class SlackUser:
     user_id: str
     email: str
     real_name: str
+    embedded_presence: str | None = None
+    embedded_online: bool | None = None
 
 
 class RetryablePollerError(RuntimeError):
@@ -68,10 +70,32 @@ def _safe_retry_after(error: SlackApiError, default: int = 10) -> int:
     return default
 
 
-def fetch_slack_users(client: WebClient) -> list[SlackUser]:
-    """Fetch non-bot, non-deleted users from Slack with pagination and retries."""
+def _presence_from_member(member: dict) -> tuple[str | None, bool | None]:
+    """Best-effort presence extraction from users.list payload."""
+    raw_presence = str(member.get("presence") or "").strip().lower()
+    if raw_presence in {"active", "away"}:
+        return raw_presence, raw_presence == "active"
+
+    if "is_active" in member:
+        active = bool(member.get("is_active"))
+        return ("active" if active else "away"), active
+
+    profile = member.get("profile") or {}
+    if "is_online" in profile:
+        active = bool(profile.get("is_online"))
+        return ("active" if active else "away"), active
+
+    return None, None
+
+
+def fetch_slack_users(client: WebClient) -> tuple[list[SlackUser], bool]:
+    """Fetch non-bot, non-deleted users from Slack.
+
+    Returns users and whether users.list contained presence metadata.
+    """
     users: list[SlackUser] = []
     cursor: str | None = None
+    has_embedded_presence = False
 
     while True:
         last_exc: Exception | None = None
@@ -79,7 +103,7 @@ def fetch_slack_users(client: WebClient) -> list[SlackUser]:
 
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                response = client.users_list(limit=200, cursor=cursor, include_locale=False)
+                response = client.users_list(limit=200, cursor=cursor, include_locale=False, presence=True)
                 break
             except SlackApiError as exc:
                 last_exc = exc
@@ -110,11 +134,16 @@ def fetch_slack_users(client: WebClient) -> list[SlackUser]:
             if member.get("deleted") or member.get("is_bot"):
                 continue
             profile = member.get("profile") or {}
+            embedded_presence, embedded_online = _presence_from_member(member)
+            if embedded_presence is not None:
+                has_embedded_presence = True
             users.append(
                 SlackUser(
                     user_id=member["id"],
                     email=str(profile.get("email") or ""),
                     real_name=str(profile.get("real_name") or member.get("real_name") or member.get("name") or ""),
+                    embedded_presence=embedded_presence,
+                    embedded_online=embedded_online,
                 )
             )
 
@@ -122,7 +151,7 @@ def fetch_slack_users(client: WebClient) -> list[SlackUser]:
         if not cursor:
             break
 
-    return users
+    return users, has_embedded_presence
 
 
 def fetch_presence(client: WebClient, user_id: str) -> dict | None:
@@ -191,15 +220,22 @@ def _insert_snapshot(supabase, row: dict) -> None:
             raise RetryablePollerError(f"DB insert failed after retries: {exc}") from exc
 
 
-def run_poll_cycle(client: WebClient, supabase, users: list[SlackUser]) -> tuple[int, int]:
+def run_poll_cycle(client: WebClient, supabase, users: list[SlackUser], has_embedded_presence: bool) -> tuple[int, int]:
     logger.info("Starting poll cycle for %d users", len(users))
     stored = 0
     attempted = 0
 
     for user in users:
         attempted += 1
-        presence = fetch_presence(client, user.user_id)
-        _sleep_rate_limit_window()
+        if has_embedded_presence and user.embedded_presence is not None:
+            presence = {
+                "presence": user.embedded_presence,
+                "online": bool(user.embedded_online),
+            }
+        else:
+            presence = fetch_presence(client, user.user_id)
+            _sleep_rate_limit_window()
+
         if presence is None:
             continue
 
@@ -231,6 +267,7 @@ def main() -> int:
     supabase = get_supabase_client()
 
     users_cache: list[SlackUser] = []
+    users_cache_has_presence = False
     users_cache_at = 0.0
 
     logger.info("Poller started (POLL_SECONDS=%s)", POLL_SECONDS)
@@ -239,14 +276,18 @@ def main() -> int:
         cycle_start = time.time()
         try:
             if (not users_cache) or (cycle_start - users_cache_at >= USER_CACHE_TTL_SECONDS):
-                users_cache = fetch_slack_users(client)
+                users_cache, users_cache_has_presence = fetch_slack_users(client)
                 users_cache_at = time.time()
-                logger.info("User cache refreshed (%d users)", len(users_cache))
+                logger.info(
+                    "User cache refreshed (%d users, embedded_presence=%s)",
+                    len(users_cache),
+                    "yes" if users_cache_has_presence else "no",
+                )
 
             if not users_cache:
                 logger.warning("No eligible users found in workspace; sleeping")
             else:
-                run_poll_cycle(client, supabase, users_cache)
+                run_poll_cycle(client, supabase, users_cache, users_cache_has_presence)
 
         except RetryablePollerError as exc:
             logger.warning("Transient poller error: %s", exc)
