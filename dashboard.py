@@ -78,20 +78,12 @@ async def index(
 
     # Prefer daily_uptime; fallback to computing from presence_snapshots
     start = datetime.combine(target_date, datetime.min.time(), tzinfo=IST)
-    if _start_time and target_date == get_ist_today():
-        # Start counting online time from when the server started
-        start = max(start, _start_time)
-        
     end = datetime.combine(target_date, datetime.min.time(), tzinfo=IST) + timedelta(days=1)
     start_str = start.isoformat()
     end_str = end.isoformat()
 
-    # Skip daily_uptime if it's today and we want to start from server start time
-    if _start_time and target_date == get_ist_today():
-        rows = []
-    else:
-        resp = supabase.table("daily_uptime").select("*").eq("date", target_date.isoformat()).execute()
-        rows = resp.data or []
+    resp = supabase.table("daily_uptime").select("*").eq("date", target_date.isoformat()).execute()
+    rows = resp.data or []
 
     if not rows:
         # Compute from presence_snapshots
@@ -169,18 +161,12 @@ async def api_uptime(
 
     supabase = get_supabase()
     start = datetime.combine(target_date, datetime.min.time(), tzinfo=IST)
-    if _start_time and target_date == get_ist_today():
-        start = max(start, _start_time)
-        
     end = datetime.combine(target_date, datetime.min.time(), tzinfo=IST) + timedelta(days=1)
     start_str = start.isoformat()
     end_str = end.isoformat()
 
-    if _start_time and target_date == get_ist_today():
-        rows = []
-    else:
-        resp = supabase.table("daily_uptime").select("*").eq("date", target_date.isoformat()).execute()
-        rows = resp.data or []
+    resp = supabase.table("daily_uptime").select("*").eq("date", target_date.isoformat()).execute()
+    rows = resp.data or []
 
     if not rows:
         snap_resp = supabase.table("presence_snapshots").select("*").gte(
