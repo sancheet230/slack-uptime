@@ -23,6 +23,13 @@ def _is_online(row: dict) -> bool:
 
 def calculate_active_seconds(snapshots: list[dict], fallback_interval_seconds: int) -> dict[str, dict]:
     """Return per-user totals computed from active durations between snapshots."""
+def calculate_active_seconds(snapshots: list[dict], fallback_interval_seconds: int) -> dict[str, dict]:
+    """Return per-user totals computed from active durations between snapshots.
+
+    For each user, duration is credited from one snapshot until the next snapshot
+    of that same user when the current snapshot has presence='active'.
+    The final active snapshot gets a conservative fallback interval.
+    """
     by_user: dict[str, list[dict]] = {}
     for row in snapshots:
         uid = row.get("user_id")
@@ -37,6 +44,7 @@ def calculate_active_seconds(snapshots: list[dict], fallback_interval_seconds: i
 
         for idx, row in enumerate(ordered):
             if not _is_online(row):
+            if row.get("presence") != "active":
                 continue
 
             current_ts = _parse_polled_at(row.get("polled_at"))
@@ -47,6 +55,7 @@ def calculate_active_seconds(snapshots: list[dict], fallback_interval_seconds: i
                 diff = int((next_ts - current_ts).total_seconds())
                 # Prevent one bad gap from exploding totals.
                 total_seconds += max(0, min(diff, fallback_interval_seconds * 6))
+                total_seconds += max(0, min(diff, fallback_interval_seconds * 3))
             else:
                 total_seconds += fallback_interval_seconds
 

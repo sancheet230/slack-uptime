@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 RATE_LIMIT_DELAY = 3.5
 USER_CACHE_TTL_SECONDS = 900
+# Rate limit: 20 requests/minute for users.getPresence
+RATE_LIMIT_DELAY = 3.5  # seconds between presence calls
+USER_CACHE_TTL_SECONDS = 900  # refresh member list every 15 minutes
 
 
 def get_supabase_client():
@@ -70,6 +73,7 @@ def fetch_presence(client: WebClient, user_id: str) -> dict | None:
 
 
 def run_poll_cycle(client: WebClient, supabase, users: list[dict]):
+    """One poll cycle: fetch presence with rate limiting, store in DB."""
     logger.info("Polling presence for %d users", len(users))
     for u in users:
         presence = fetch_presence(client, u["user_id"])
@@ -104,6 +108,8 @@ def main():
 
     client = WebClient(token=SLACK_BOT_TOKEN)
     supabase = get_supabase_client()
+    logger.info("Starting presence poller (target interval=%ds) - runs 24/7", POLL_SECONDS)
+
     logger.info("Starting presence poller (target interval=%ds) - runs 24/7", POLL_SECONDS)
 
     cached_users: list[dict] = []
