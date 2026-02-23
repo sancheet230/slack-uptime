@@ -1,10 +1,13 @@
-"""Robust Slack presence poller.
+"""Slack presence poller.
 
-Behavior:
-- Fetch active workspace members periodically.
-- Query users.getPresence with Slack-aware rate limiting.
-- Store snapshots in Supabase/PostgREST.
-- Recover from transient Slack/DB/network failures and continue running.
+Design goals:
+- Refresh workspace membership every cycle so newly joined org members are
+  tracked immediately.
+- Prefer embedded presence from users.list when available (faster + fewer API
+  calls).
+- Fallback to users.getPresence per user when users.list does not include
+  reliable presence.
+- Keep retry and rate-limit handling for Slack and Supabase operations.
 """
 from __future__ import annotations
 
@@ -26,13 +29,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("presence_poller")
 
-# Slack Tier-2 guidance: users.getPresence is roughly 20 req/min.
 REQUESTS_PER_MINUTE = 20
 MIN_DELAY_SECONDS = 60.0 / REQUESTS_PER_MINUTE
-# Small jitter avoids a rigid request pattern.
 MAX_JITTER_SECONDS = 0.35
-
-USER_CACHE_TTL_SECONDS = 15 * 60
 MAX_RETRIES = 4
 
 
@@ -70,36 +69,46 @@ def _safe_retry_after(error: SlackApiError, default: int = 10) -> int:
     return default
 
 
+def _slack_error_code(exc: SlackApiError) -> str:
+    response = exc.response
+    if response is None:
+        return "unknown_error"
+    try:
+        return str(response.get("error", "unknown_error"))
+    except Exception:
+        return "unknown_error"
+
+
 def _presence_from_member(member: dict) -> tuple[str | None, bool | None]:
-    """Best-effort presence extraction from users.list payload."""
+    """Best-effort extraction of presence from users.list payload."""
     raw_presence = str(member.get("presence") or "").strip().lower()
     if raw_presence in {"active", "away"}:
         return raw_presence, raw_presence == "active"
 
     if "is_active" in member:
-        active = bool(member.get("is_active"))
-        return ("active" if active else "away"), active
+        is_active = bool(member.get("is_active"))
+        return ("active" if is_active else "away"), is_active
 
     profile = member.get("profile") or {}
     if "is_online" in profile:
-        active = bool(profile.get("is_online"))
-        return ("active" if active else "away"), active
+        is_online = bool(profile.get("is_online"))
+        return ("active" if is_online else "away"), is_online
 
     return None, None
 
 
-def fetch_slack_users(client: WebClient) -> tuple[list[SlackUser], bool]:
-    """Fetch non-bot, non-deleted users from Slack.
+def fetch_workspace_users(client: WebClient) -> tuple[list[SlackUser], bool]:
+    """Fetch active human users from Slack.
 
-    Returns users and whether users.list contained presence metadata.
+    Returns tuple(users, has_any_embedded_presence).
     """
     users: list[SlackUser] = []
     cursor: str | None = None
-    has_embedded_presence = False
+    has_any_embedded_presence = False
 
     while True:
-        last_exc: Exception | None = None
         response = None
+        last_exc: Exception | None = None
 
         for attempt in range(1, MAX_RETRIES + 1):
             try:
@@ -107,7 +116,7 @@ def fetch_slack_users(client: WebClient) -> tuple[list[SlackUser], bool]:
                 break
             except SlackApiError as exc:
                 last_exc = exc
-                code = (exc.response or {}).get("error", "unknown_error")
+                code = _slack_error_code(exc)
                 if code == "ratelimited":
                     wait_for = _safe_retry_after(exc)
                     logger.warning("users.list rate-limited, sleeping %ss", wait_for)
@@ -119,7 +128,7 @@ def fetch_slack_users(client: WebClient) -> tuple[list[SlackUser], bool]:
                     time.sleep(backoff)
                     continue
                 raise
-            except Exception as exc:  # network or transport issues
+            except Exception as exc:
                 last_exc = exc
                 if attempt < MAX_RETRIES:
                     backoff = min(20, 2**attempt)
@@ -136,7 +145,7 @@ def fetch_slack_users(client: WebClient) -> tuple[list[SlackUser], bool]:
             profile = member.get("profile") or {}
             embedded_presence, embedded_online = _presence_from_member(member)
             if embedded_presence is not None:
-                has_embedded_presence = True
+                has_any_embedded_presence = True
             users.append(
                 SlackUser(
                     user_id=member["id"],
@@ -151,7 +160,7 @@ def fetch_slack_users(client: WebClient) -> tuple[list[SlackUser], bool]:
         if not cursor:
             break
 
-    return users, has_embedded_presence
+    return users, has_any_embedded_presence
 
 
 def fetch_presence(client: WebClient, user_id: str) -> dict | None:
@@ -169,12 +178,11 @@ def fetch_presence(client: WebClient, user_id: str) -> dict | None:
 
             manual_away = bool(resp.get("manual_away", False))
             connection_count = int(resp.get("connection_count") or 0)
-
             inferred_online = online or raw_presence == "active" or (connection_count > 0 and not manual_away)
             return {"presence": "active" if inferred_online else "away", "online": inferred_online}
 
         except SlackApiError as exc:
-            code = (exc.response or {}).get("error", "unknown_error")
+            code = _slack_error_code(exc)
             if code == "missing_scope":
                 logger.error("Missing presence:read scope for users.getPresence")
                 return None
@@ -220,13 +228,31 @@ def _insert_snapshot(supabase, row: dict) -> None:
             raise RetryablePollerError(f"DB insert failed after retries: {exc}") from exc
 
 
+def _upsert_user_cache(supabase, user: SlackUser) -> None:
+    row = {
+        "user_id": user.user_id,
+        "email": user.email or None,
+        "real_name": user.real_name or None,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            supabase.table("user_cache").upsert(row, on_conflict="user_id").execute()
+            return
+        except Exception as exc:
+            if attempt < MAX_RETRIES:
+                backoff = min(20, 2**attempt)
+                logger.warning("user_cache upsert failed (%s), retry in %ss", exc, backoff)
+                time.sleep(backoff)
+                continue
+            raise RetryablePollerError(f"user_cache upsert failed after retries: {exc}") from exc
+
+
 def run_poll_cycle(client: WebClient, supabase, users: list[SlackUser], has_embedded_presence: bool) -> tuple[int, int]:
     logger.info("Starting poll cycle for %d users", len(users))
     stored = 0
-    attempted = 0
 
     for user in users:
-        attempted += 1
         if has_embedded_presence and user.embedded_presence is not None:
             presence = {
                 "presence": user.embedded_presence,
@@ -249,10 +275,11 @@ def run_poll_cycle(client: WebClient, supabase, users: list[SlackUser], has_embe
         }
 
         _insert_snapshot(supabase, snapshot)
+        _upsert_user_cache(supabase, user)
         stored += 1
 
-    logger.info("Poll cycle complete: attempted=%d stored=%d", attempted, stored)
-    return attempted, stored
+    logger.info("Poll cycle complete: stored=%d", stored)
+    return len(users), stored
 
 
 def main() -> int:
@@ -265,34 +292,29 @@ def main() -> int:
 
     client = WebClient(token=SLACK_BOT_TOKEN)
     supabase = get_supabase_client()
-
-    users_cache: list[SlackUser] = []
-    users_cache_has_presence = False
-    users_cache_at = 0.0
+    known_user_ids: set[str] = set()
 
     logger.info("Poller started (POLL_SECONDS=%s)", POLL_SECONDS)
 
     while True:
         cycle_start = time.time()
         try:
-            if (not users_cache) or (cycle_start - users_cache_at >= USER_CACHE_TTL_SECONDS):
-                users_cache, users_cache_has_presence = fetch_slack_users(client)
-                users_cache_at = time.time()
-                logger.info(
-                    "User cache refreshed (%d users, embedded_presence=%s)",
-                    len(users_cache),
-                    "yes" if users_cache_has_presence else "no",
-                )
+            users, has_embedded_presence = fetch_workspace_users(client)
+            current_user_ids = {user.user_id for user in users}
+            new_ids = current_user_ids - known_user_ids
+            if new_ids:
+                logger.info("Detected %d newly joined/newly visible members", len(new_ids))
+            known_user_ids = current_user_ids
 
-            if not users_cache:
+            if not users:
                 logger.warning("No eligible users found in workspace; sleeping")
             else:
-                run_poll_cycle(client, supabase, users_cache, users_cache_has_presence)
+                run_poll_cycle(client, supabase, users, has_embedded_presence)
 
         except RetryablePollerError as exc:
             logger.warning("Transient poller error: %s", exc)
         except SlackApiError as exc:
-            code = (exc.response or {}).get("error", "unknown_error")
+            code = _slack_error_code(exc)
             logger.error("Slack API error in main loop: %s", code)
             if code == "ratelimited":
                 wait_for = _safe_retry_after(exc)
