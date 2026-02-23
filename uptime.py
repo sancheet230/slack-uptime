@@ -14,6 +14,15 @@ def _parse_polled_at(value: str | None) -> datetime | None:
         return None
 
 
+def _is_online(row: dict) -> bool:
+    """Treat online=True as active even if presence text is stale/away."""
+    if row.get("online") is True:
+        return True
+    return row.get("presence") == "active"
+
+
+def calculate_active_seconds(snapshots: list[dict], fallback_interval_seconds: int) -> dict[str, dict]:
+    """Return per-user totals computed from active durations between snapshots."""
 def calculate_active_seconds(snapshots: list[dict], fallback_interval_seconds: int) -> dict[str, dict]:
     """Return per-user totals computed from active durations between snapshots.
 
@@ -34,6 +43,7 @@ def calculate_active_seconds(snapshots: list[dict], fallback_interval_seconds: i
         total_seconds = 0
 
         for idx, row in enumerate(ordered):
+            if not _is_online(row):
             if row.get("presence") != "active":
                 continue
 
@@ -43,6 +53,8 @@ def calculate_active_seconds(snapshots: list[dict], fallback_interval_seconds: i
 
             if current_ts and next_ts and next_ts > current_ts:
                 diff = int((next_ts - current_ts).total_seconds())
+                # Prevent one bad gap from exploding totals.
+                total_seconds += max(0, min(diff, fallback_interval_seconds * 6))
                 total_seconds += max(0, min(diff, fallback_interval_seconds * 3))
             else:
                 total_seconds += fallback_interval_seconds
