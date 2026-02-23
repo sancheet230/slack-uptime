@@ -18,9 +18,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-RATE_LIMIT_DELAY = 3.5
-USER_CACHE_TTL_SECONDS = 900
-# Rate limit: 20 requests/minute for users.getPresence
 RATE_LIMIT_DELAY = 3.5  # seconds between presence calls
 USER_CACHE_TTL_SECONDS = 900  # refresh member list every 15 minutes
 
@@ -108,8 +105,6 @@ def main():
 
     client = WebClient(token=SLACK_BOT_TOKEN)
     supabase = get_supabase_client()
-    logger.info("Starting presence poller (target interval=%ds) - runs 24/7", POLL_SECONDS)
-
     logger.info("Starting presence poller (target interval=%ds) - runs 24/7", POLL_SECONDS)
 
     cached_users: list[dict] = []

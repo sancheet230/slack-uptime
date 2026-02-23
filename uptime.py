@@ -4,9 +4,13 @@ from __future__ import annotations
 from datetime import datetime
 
 
+MAX_GAP_MULTIPLIER = 3
+
+
 def _parse_polled_at(value: str | None) -> datetime | None:
     if not value:
         return None
+
     normalized = value.replace("Z", "+00:00")
     try:
         return datetime.fromisoformat(normalized)
@@ -15,27 +19,27 @@ def _parse_polled_at(value: str | None) -> datetime | None:
 
 
 def _is_online(row: dict) -> bool:
-    """Treat online=True as active even if presence text is stale/away."""
+    """Treat `online=True` as active even if text presence is stale."""
     if row.get("online") is True:
         return True
     return row.get("presence") == "active"
 
 
-def calculate_active_seconds(snapshots: list[dict], fallback_interval_seconds: int) -> dict[str, dict]:
-    """Return per-user totals computed from active durations between snapshots."""
-def calculate_active_seconds(snapshots: list[dict], fallback_interval_seconds: int) -> dict[str, dict]:
+def calculate_active_seconds(
+    snapshots: list[dict],
+    fallback_interval_seconds: int,
+) -> dict[str, dict]:
     """Return per-user totals computed from active durations between snapshots.
 
-    For each user, duration is credited from one snapshot until the next snapshot
-    of that same user when the current snapshot has presence='active'.
+    Duration is credited from one snapshot until the next snapshot of the same user,
+    when the current snapshot indicates the user is online/active.
     The final active snapshot gets a conservative fallback interval.
     """
     by_user: dict[str, list[dict]] = {}
     for row in snapshots:
         uid = row.get("user_id")
-        if not uid:
-            continue
-        by_user.setdefault(uid, []).append(row)
+        if uid:
+            by_user.setdefault(uid, []).append(row)
 
     totals: dict[str, dict] = {}
     for uid, rows in by_user.items():
@@ -44,7 +48,6 @@ def calculate_active_seconds(snapshots: list[dict], fallback_interval_seconds: i
 
         for idx, row in enumerate(ordered):
             if not _is_online(row):
-            if row.get("presence") != "active":
                 continue
 
             current_ts = _parse_polled_at(row.get("polled_at"))
@@ -53,11 +56,10 @@ def calculate_active_seconds(snapshots: list[dict], fallback_interval_seconds: i
 
             if current_ts and next_ts and next_ts > current_ts:
                 diff = int((next_ts - current_ts).total_seconds())
-                # Prevent one bad gap from exploding totals.
-                total_seconds += max(0, min(diff, fallback_interval_seconds * 6))
-                total_seconds += max(0, min(diff, fallback_interval_seconds * 3))
+                max_allowed = max(1, fallback_interval_seconds) * MAX_GAP_MULTIPLIER
+                total_seconds += max(0, min(diff, max_allowed))
             else:
-                total_seconds += fallback_interval_seconds
+                total_seconds += max(1, fallback_interval_seconds)
 
         first = ordered[0]
         totals[uid] = {
@@ -80,7 +82,5 @@ def format_duration_rounded(seconds: int) -> str:
     rem_minutes = minutes % 60
 
     if hours > 0:
-        if rem_minutes:
-            return f"{hours}h {rem_minutes}m"
-        return f"{hours}h"
+        return f"{hours}h {rem_minutes}m" if rem_minutes else f"{hours}h"
     return f"{max(1, minutes)}m"
