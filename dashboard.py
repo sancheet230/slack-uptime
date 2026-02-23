@@ -90,6 +90,40 @@ async def index(
         )
 
     rows = _build_rows(get_supabase(), target_date)
+    supabase = get_supabase()
+
+    # Prefer daily_uptime; fallback to computing from presence_snapshots
+    start = datetime.combine(target_date, datetime.min.time(), tzinfo=IST)
+    end = datetime.combine(target_date, datetime.min.time(), tzinfo=IST) + timedelta(days=1)
+    start_str = start.isoformat()
+    end_str = end.isoformat()
+
+    resp = supabase.table("daily_uptime").select("*").eq("date", target_date.isoformat()).execute()
+    rows = resp.data or []
+
+    if not rows:
+        # Compute from presence_snapshots
+        snap_resp = supabase.table("presence_snapshots").select("*").gte(
+            "polled_at", start_str
+        ).lt("polled_at", end_str).execute()
+        snapshots = snap_resp.data or []
+        by_user: dict[str, dict] = {}
+        for s in snapshots:
+            uid = s["user_id"]
+            if uid not in by_user:
+                by_user[uid] = {"user_email": s.get("user_email"), "user_name": s.get("user_name"), "count": 0}
+            if s.get("presence") == "active":
+                by_user[uid]["count"] += 1
+        actual_poll_interval = POLL_SECONDS + (len(by_user) * 3.5) if by_user else POLL_SECONDS
+        rows = [
+            {
+                "user_id": uid,
+                "user_email": data["user_email"],
+                "user_name": data["user_name"],
+                "total_seconds_online": int(data["count"] * actual_poll_interval),
+            }
+            for uid, data in by_user.items()
+        ]
 
     if q:
         ql = q.lower()
@@ -147,6 +181,37 @@ async def api_uptime(
         return {"error": "Supabase not configured", "users": []}
 
     rows = _build_rows(get_supabase(), target_date)
+    supabase = get_supabase()
+    start = datetime.combine(target_date, datetime.min.time(), tzinfo=IST)
+    end = datetime.combine(target_date, datetime.min.time(), tzinfo=IST) + timedelta(days=1)
+    start_str = start.isoformat()
+    end_str = end.isoformat()
+
+    resp = supabase.table("daily_uptime").select("*").eq("date", target_date.isoformat()).execute()
+    rows = resp.data or []
+
+    if not rows:
+        snap_resp = supabase.table("presence_snapshots").select("*").gte(
+            "polled_at", start_str
+        ).lt("polled_at", end_str).execute()
+        snapshots = snap_resp.data or []
+        by_user = {}
+        for s in snapshots:
+            uid = s["user_id"]
+            if uid not in by_user:
+                by_user[uid] = {"user_email": s.get("user_email"), "user_name": s.get("user_name"), "count": 0}
+            if s.get("presence") == "active":
+                by_user[uid]["count"] += 1
+        actual_poll_interval = POLL_SECONDS + (len(by_user) * 3.5) if by_user else POLL_SECONDS
+        rows = [
+            {
+                "user_id": uid,
+                "user_email": data["user_email"],
+                "user_name": data["user_name"],
+                "total_seconds_online": int(data["count"] * actual_poll_interval),
+            }
+            for uid, data in by_user.items()
+        ]
 
     if q:
         ql = q.lower()
