@@ -2,13 +2,14 @@
 Slack presence poller: fetches user presence periodically and stores in Supabase.
 Slack API rate limit: 20 users.getPresence calls per minute (Tier 2).
 """
-import time
 import logging
+import time
 from datetime import datetime, timezone
+
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-from config import SLACK_BOT_TOKEN, POLL_SECONDS, SUPABASE_URL, SUPABASE_SERVICE_KEY
+from config import POLL_SECONDS, SLACK_BOT_TOKEN, SUPABASE_SERVICE_KEY, SUPABASE_URL
 
 logging.basicConfig(
     level=logging.INFO,
@@ -17,33 +18,31 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Rate limit: 20 requests/minute for users.getPresence
-RATE_LIMIT_DELAY = 3.5  # seconds between presence calls
+RATE_LIMIT_DELAY = 3.5
+USER_CACHE_TTL_SECONDS = 900
 
 
 def get_supabase_client():
     from db import create_client
+
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 
 def fetch_slack_users(client: WebClient) -> list[dict]:
-    """Fetch all non-deleted, non-bot users from Slack."""
     users = []
     cursor = None
     while True:
-        resp = client.users_list(
-            limit=200,
-            cursor=cursor,
-            include_locale=False,
-        )
+        resp = client.users_list(limit=200, cursor=cursor, include_locale=False)
         for u in resp.get("members", []):
             if u.get("is_bot") or u.get("deleted"):
                 continue
-            users.append({
-                "user_id": u["id"],
-                "email": u.get("profile", {}).get("email") or "",
-                "real_name": u.get("profile", {}).get("real_name") or u.get("name", ""),
-            })
+            users.append(
+                {
+                    "user_id": u["id"],
+                    "email": u.get("profile", {}).get("email") or "",
+                    "real_name": u.get("profile", {}).get("real_name") or u.get("name", ""),
+                }
+            )
         cursor = resp.get("response_metadata", {}).get("next_cursor")
         if not cursor:
             break
@@ -51,26 +50,27 @@ def fetch_slack_users(client: WebClient) -> list[dict]:
 
 
 def fetch_presence(client: WebClient, user_id: str) -> dict | None:
-    """Get presence for one user."""
     try:
         resp = client.users_getPresence(user=user_id)
-        return {
-            "presence": resp.get("presence", "away"),
-            "online": resp.get("online", False),
-        }
+        raw_presence = resp.get("presence", "away")
+        online_flag = bool(resp.get("online", False))
+        normalized_presence = "active" if (online_flag or raw_presence == "active") else "away"
+        return {"presence": normalized_presence, "online": online_flag}
     except SlackApiError as e:
-        if e.response["error"] == "missing_scope":
+        error_code = e.response.get("error") if e.response else "unknown_error"
+        if error_code == "missing_scope":
             logger.warning("Need presence:read scope for users.getPresence")
+        elif error_code == "ratelimited":
+            retry_after = int(e.response.headers.get("Retry-After", "5")) if e.response else 5
+            logger.warning("Rate limited by Slack. Sleeping %ss", retry_after)
+            time.sleep(retry_after)
         else:
-            logger.debug("Presence error for %s: %s", user_id, e.response.get("error"))
+            logger.debug("Presence error for %s: %s", user_id, error_code)
         return None
 
 
-def run_poll_cycle(client: WebClient, supabase):
-    """One poll cycle: get all users, fetch presence with rate limiting, store in DB."""
-    users = fetch_slack_users(client)
+def run_poll_cycle(client: WebClient, supabase, users: list[dict]):
     logger.info("Polling presence for %d users", len(users))
-
     for u in users:
         presence = fetch_presence(client, u["user_id"])
         if presence is None:
@@ -89,7 +89,6 @@ def run_poll_cycle(client: WebClient, supabase):
         except Exception as ex:
             logger.error("DB insert failed: %s", ex)
 
-        # Respect rate limit (20 calls/min)
         time.sleep(RATE_LIMIT_DELAY)
 
     logger.info("Poll cycle done at %s", datetime.now(timezone.utc).isoformat())
@@ -105,18 +104,29 @@ def main():
 
     client = WebClient(token=SLACK_BOT_TOKEN)
     supabase = get_supabase_client()
+    logger.info("Starting presence poller (target interval=%ds) - runs 24/7", POLL_SECONDS)
 
-    logger.info("Starting presence poller (interval=%ds) - runs 24/7", POLL_SECONDS)
+    cached_users: list[dict] = []
+    users_last_fetched = 0.0
 
     while True:
+        cycle_start = time.time()
         try:
-            run_poll_cycle(client, supabase)
+            if not cached_users or (cycle_start - users_last_fetched) >= USER_CACHE_TTL_SECONDS:
+                cached_users = fetch_slack_users(client)
+                users_last_fetched = cycle_start
+                logger.info("Refreshed Slack user list: %d users", len(cached_users))
+
+            run_poll_cycle(client, supabase, cached_users)
         except SlackApiError as e:
             logger.error("Slack API error: %s", e)
         except Exception as e:
             logger.exception("Unexpected error: %s", e)
 
-        time.sleep(POLL_SECONDS)
+        elapsed = time.time() - cycle_start
+        sleep_for = max(0, POLL_SECONDS - elapsed)
+        if sleep_for > 0:
+            time.sleep(sleep_for)
 
 
 if __name__ == "__main__":
