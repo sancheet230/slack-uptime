@@ -1,31 +1,20 @@
+"""Thin Supabase/PostgREST client.
+
+Implements a tiny subset of supabase-py style used by this project:
+- table(name).insert(row).execute()
+- table(name).select(...).eq(...).gte(...).lt(...).execute()
+- table(name).upsert(row, on_conflict=...).execute()
 """
-Thin Supabase/PostgREST client using HTTP - avoids heavy supabase-py dependencies
-that require pyiceberg (fails to build on Windows/Python 3.14).
-"""
+from __future__ import annotations
+
 import httpx
-
-from config import SUPABASE_SERVICE_KEY, SUPABASE_URL
-
-BASE = f"{SUPABASE_URL.rstrip('/')}/rest/v1"
-HEADERS = {
-    "apikey": SUPABASE_SERVICE_KEY,
-    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-    "Content-Type": "application/json",
-    "Prefer": "return=minimal",
-}
-
-
-def _client():
-    return httpx.Client(base_url=BASE, headers=HEADERS, timeout=30.0)
 
 
 class SelectBuilder:
-    """Chainable select builder matching supabase .select().eq().gte().lt().execute()"""
-
-    def __init__(self, table: str, columns: str = "*"):
+    def __init__(self, client: httpx.Client, table: str, columns: str = "*"):
+        self._client = client
         self._table = table
-        self._cols = columns or "*"
-        self._params: list[tuple[str, str]] = [("select", self._cols)]
+        self._params: list[tuple[str, str]] = [("select", columns or "*")]
 
     def eq(self, col: str, val):
         self._params.append((col, f"eq.{val}"))
@@ -40,59 +29,79 @@ class SelectBuilder:
         return self
 
     def execute(self):
-        with _client() as c:
-            r = c.get(f"/{self._table}", params=self._params)
-            r.raise_for_status()
-            data = r.json()
-        return type("Resp", (), {"data": data if data is not None else []})()
+        response = self._client.get(f"/{self._table}", params=self._params)
+        response.raise_for_status()
+        payload = response.json()
+        return type("Resp", (), {"data": payload if payload is not None else []})()
 
 
 class InsertBuilder:
-    def __init__(self, table: str, row: dict):
+    def __init__(self, client: httpx.Client, table: str, row: dict):
+        self._client = client
         self._table = table
         self._row = row
 
     def execute(self):
-        with _client() as c:
-            r = c.post(f"/{self._table}", json=self._row)
-            r.raise_for_status()
+        response = self._client.post(f"/{self._table}", json=self._row)
+        response.raise_for_status()
+        return type("Resp", (), {"data": None})()
 
 
 class UpsertBuilder:
-    def __init__(self, table: str, row: dict, on_conflict: str):
+    def __init__(self, client: httpx.Client, table: str, row: dict, on_conflict: str):
+        self._client = client
         self._table = table
         self._row = row
         self._on_conflict = on_conflict
 
     def execute(self):
-        h = {**HEADERS, "Prefer": "resolution=merge-duplicates,return=minimal"}
-        with httpx.Client(base_url=BASE, headers=h, timeout=30.0) as c:
-            r = c.post(f"/{self._table}?on_conflict={self._on_conflict}", json=self._row)
-            r.raise_for_status()
+        response = self._client.post(
+            f"/{self._table}",
+            params={"on_conflict": self._on_conflict},
+            json=self._row,
+            headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
+        )
+        response.raise_for_status()
+        return type("Resp", (), {"data": None})()
 
 
 class TableClient:
-    """supabase.table()-style API."""
-
-    def __init__(self, name: str):
+    def __init__(self, client: httpx.Client, name: str):
+        self._client = client
         self._table = name
 
     def insert(self, row: dict) -> InsertBuilder:
-        return InsertBuilder(self._table, row)
+        return InsertBuilder(self._client, self._table, row)
 
     def select(self, *columns) -> SelectBuilder:
-        cols = ",".join(columns) if columns else "*"
-        return SelectBuilder(self._table, cols)
+        return SelectBuilder(self._client, self._table, ",".join(columns) if columns else "*")
 
     def upsert(self, row: dict, on_conflict: str) -> UpsertBuilder:
-        return UpsertBuilder(self._table, row, on_conflict)
+        return UpsertBuilder(self._client, self._table, row, on_conflict)
 
 
 class SupabaseClient:
+    def __init__(self, base_url: str, service_key: str, timeout: float = 30.0):
+        root = (base_url or "").rstrip("/")
+        if not root:
+            raise ValueError("Supabase URL is required")
+        if not service_key:
+            raise ValueError("Supabase service key is required")
+
+        self._client = httpx.Client(
+            base_url=f"{root}/rest/v1",
+            headers={
+                "apikey": service_key,
+                "Authorization": f"Bearer {service_key}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal",
+            },
+            timeout=timeout,
+        )
+
     def table(self, name: str) -> TableClient:
-        return TableClient(name)
+        return TableClient(self._client, name)
 
 
 def create_client(url: str, key: str) -> SupabaseClient:
-    """Drop-in for: from supabase import create_client"""
-    return SupabaseClient()
+    return SupabaseClient(url, key)
