@@ -9,10 +9,14 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pathlib import Path
 
+from uptime import calculate_active_seconds, format_duration_rounded
+
 IST = ZoneInfo("Asia/Kolkata")
+
 
 def get_ist_today() -> date:
     return datetime.now(IST).date()
+
 
 from config import SUPABASE_URL, SUPABASE_SERVICE_KEY, POLL_SECONDS
 
@@ -40,18 +44,22 @@ def get_supabase():
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 
-def format_duration(seconds: int) -> str:
-    """Format seconds as readable string (e.g. 2h 30m 15s)."""
-    if seconds <= 0:
-        return "0s"
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    if hours > 0:
-        return f"{hours}h {minutes}m {secs}s"
-    elif minutes > 0:
-        return f"{minutes}m {secs}s"
-    return f"{secs}s"
+def _build_rows(supabase, target_date: date) -> list[dict]:
+    start = datetime.combine(target_date, datetime.min.time(), tzinfo=IST)
+    end = start + timedelta(days=1)
+
+    resp = supabase.table("daily_uptime").select("*").eq("date", target_date.isoformat()).execute()
+    rows = resp.data or []
+    if rows:
+        return rows
+
+    snap_resp = supabase.table("presence_snapshots").select("*").gte(
+        "polled_at", start.isoformat()
+    ).lt("polled_at", end.isoformat()).execute()
+
+    snapshots = snap_resp.data or []
+    totals = calculate_active_seconds(snapshots, fallback_interval_seconds=POLL_SECONDS)
+    return list(totals.values())
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -71,9 +79,17 @@ async def index(
         elapsed = (datetime.now(timezone.utc) - _start_time).total_seconds() if _start_time else 0
         return templates.TemplateResponse(
             "dashboard.html",
-            {"request": request, "users": [], "date": target_date, "search": q, "error": "Supabase not configured", "script_uptime_hrs": round(elapsed / 3600, 1)},
+            {
+                "request": request,
+                "users": [],
+                "date": target_date,
+                "search": q,
+                "error": "Supabase not configured",
+                "script_uptime_hrs": round(elapsed / 3600, 1),
+            },
         )
 
+    rows = _build_rows(get_supabase(), target_date)
     supabase = get_supabase()
 
     # Prefer daily_uptime; fallback to computing from presence_snapshots
@@ -109,7 +125,6 @@ async def index(
             for uid, data in by_user.items()
         ]
 
-    # Search filter
     if q:
         ql = q.lower()
         rows = [
@@ -123,13 +138,12 @@ async def index(
             "email": r.get("user_email") or "(no email)",
             "name": r.get("user_name") or "(no name)",
             "seconds": r.get("total_seconds_online", 0),
-            "formatted": format_duration(r.get("total_seconds_online", 0)),
+            "formatted": format_duration_rounded(r.get("total_seconds_online", 0)),
         }
         for r in rows
     ]
     users.sort(key=lambda x: -x["seconds"])
 
-    # Script uptime in hours (how long the app has been running)
     script_uptime_hrs = 0
     start_time_iso = None
     if _start_time:
@@ -139,7 +153,14 @@ async def index(
 
     return templates.TemplateResponse(
         "dashboard.html",
-        {"request": request, "users": users, "date": target_date, "search": q, "script_uptime_hrs": script_uptime_hrs, "script_start_time": start_time_iso},
+        {
+            "request": request,
+            "users": users,
+            "date": target_date,
+            "search": q,
+            "script_uptime_hrs": script_uptime_hrs,
+            "script_start_time": start_time_iso,
+        },
     )
 
 
@@ -159,6 +180,7 @@ async def api_uptime(
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         return {"error": "Supabase not configured", "users": []}
 
+    rows = _build_rows(get_supabase(), target_date)
     supabase = get_supabase()
     start = datetime.combine(target_date, datetime.min.time(), tzinfo=IST)
     end = datetime.combine(target_date, datetime.min.time(), tzinfo=IST) + timedelta(days=1)
@@ -215,7 +237,7 @@ async def api_uptime(
                 "email": r.get("user_email"),
                 "name": r.get("user_name"),
                 "total_seconds_online": r.get("total_seconds_online", 0),
-                "formatted": format_duration(r.get("total_seconds_online", 0)),
+                "formatted": format_duration_rounded(r.get("total_seconds_online", 0)),
             }
             for r in rows
         ],
