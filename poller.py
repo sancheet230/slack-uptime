@@ -52,10 +52,24 @@ def fetch_slack_users(client: WebClient) -> list[dict]:
 def fetch_presence(client: WebClient, user_id: str) -> dict | None:
     try:
         resp = client.users_getPresence(user=user_id)
-        raw_presence = resp.get("presence", "away")
-        online_flag = bool(resp.get("online", False))
-        normalized_presence = "active" if (online_flag or raw_presence == "active") else "away"
-        return {"presence": normalized_presence, "online": online_flag}
+        raw_presence = str(resp.get("presence", "away") or "away").strip().lower()
+
+        raw_online = resp.get("online", False)
+        if isinstance(raw_online, str):
+            online_flag = raw_online.strip().lower() in {"true", "1", "yes", "on", "y", "t"}
+        else:
+            online_flag = bool(raw_online)
+
+        manual_away = bool(resp.get("manual_away", False))
+        connection_count = int(resp.get("connection_count") or 0)
+
+        # Slack presence can stay "away" for some users even while connected.
+        # Treat connected sessions as active unless user explicitly set manual away.
+        inferred_online = online_flag or raw_presence == "active" or (
+            connection_count > 0 and not manual_away
+        )
+        normalized_presence = "active" if inferred_online else "away"
+        return {"presence": normalized_presence, "online": inferred_online}
     except SlackApiError as e:
         error_code = e.response.get("error") if e.response else "unknown_error"
         if error_code == "missing_scope":
