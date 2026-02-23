@@ -1,8 +1,7 @@
-"""
-Basic dashboard for Slack user uptime.
-Shows user email/name and total online time per date, with search.
-"""
-from datetime import date, datetime, timezone, timedelta
+"""Basic dashboard for Slack user uptime."""
+from __future__ import annotations
+
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -13,32 +12,33 @@ from fastapi.templating import Jinja2Templates
 from config import POLL_SECONDS, SUPABASE_SERVICE_KEY, SUPABASE_URL
 from uptime import calculate_active_seconds, format_duration_rounded
 
-from uptime import calculate_active_seconds, format_duration_rounded
-
 IST = ZoneInfo("Asia/Kolkata")
+
+app = FastAPI(title="Slack Uptime Dashboard")
+templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+_start_time: datetime | None = None
+
+
+@app.on_event("startup")
+def _on_startup() -> None:
+    global _start_time
+    _start_time = datetime.now(timezone.utc)
+
+
+@app.get("/health")
+async def health() -> dict:
+    return {"status": "ok"}
 
 
 def get_ist_today() -> date:
     return datetime.now(IST).date()
 
 
-from config import SUPABASE_URL, SUPABASE_SERVICE_KEY, POLL_SECONDS
-
-app = FastAPI(title="Slack Uptime Dashboard")
-templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
-
-_start_time: datetime | None = None
-
-
-@app.on_event("startup")
-def _on_startup():
-    global _start_time
-    _start_time = datetime.now(timezone.utc)
-
-
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
+def _script_uptime_meta() -> tuple[float, str | None]:
+    if not _start_time:
+        return 0.0, None
+    elapsed = (datetime.now(timezone.utc) - _start_time).total_seconds()
+    return round(elapsed / 3600, 1), _start_time.isoformat()
 
 
 def get_supabase():
@@ -47,113 +47,97 @@ def get_supabase():
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 
+def _rows_from_daily_uptime(supabase, target_date: date) -> list[dict]:
+    resp = supabase.table("daily_uptime").select("*").eq("date", target_date.isoformat()).execute()
+    rows = resp.data or []
+    return [
+        {
+            "user_id": r.get("user_id"),
+            "user_email": r.get("user_email"),
+            "user_name": r.get("user_name"),
+            "total_seconds_online": int(r.get("total_seconds_online", 0) or 0),
+        }
+        for r in rows
+        if r.get("user_id")
+    ]
+
+
 def _rows_from_snapshots(supabase, target_date: date) -> list[dict]:
     start = datetime.combine(target_date, datetime.min.time(), tzinfo=IST)
     end = start + timedelta(days=1)
 
-    snap_resp = (
+    resp = (
         supabase.table("presence_snapshots")
         .select("*")
         .gte("polled_at", start.isoformat())
         .lt("polled_at", end.isoformat())
         .execute()
     )
-    snapshots = snap_resp.data or []
-    totals = calculate_active_seconds(snapshots, fallback_interval_seconds=POLL_SECONDS)
+    totals = calculate_active_seconds(resp.data or [], fallback_interval_seconds=POLL_SECONDS)
     return list(totals.values())
 
 
 def _merge_rows(primary_rows: list[dict], live_rows: list[dict]) -> list[dict]:
-    """Merge rows by user_id, keeping the larger total to avoid zero/stale regressions."""
     merged: dict[str, dict] = {}
 
-    for row in primary_rows:
+    def _upsert(row: dict) -> None:
         uid = row.get("user_id")
         if not uid:
-            continue
-        merged[uid] = {
-            "user_id": uid,
-            "user_email": row.get("user_email"),
-            "user_name": row.get("user_name"),
-            "total_seconds_online": int(row.get("total_seconds_online", 0) or 0),
-        }
-
-    for row in live_rows:
-        uid = row.get("user_id")
-        if not uid:
-            continue
+            return
         seconds = int(row.get("total_seconds_online", 0) or 0)
-        existing = merged.get(uid)
-        if not existing or seconds > existing.get("total_seconds_online", 0):
+        current = merged.get(uid)
+        if current is None or seconds >= current.get("total_seconds_online", 0):
             merged[uid] = {
                 "user_id": uid,
-                "user_email": row.get("user_email") or (existing or {}).get("user_email"),
-                "user_name": row.get("user_name") or (existing or {}).get("user_name"),
+                "user_email": row.get("user_email") or (current or {}).get("user_email"),
+                "user_name": row.get("user_name") or (current or {}).get("user_name"),
                 "total_seconds_online": seconds,
             }
+
+    for row in primary_rows:
+        _upsert(row)
+    for row in live_rows:
+        _upsert(row)
 
     return list(merged.values())
 
 
-def _build_rows(supabase, target_date: date) -> list[dict]:
-    """Build rows with aggregate-first strategy plus live guard for today's data."""
-    resp = supabase.table("daily_uptime").select("*").eq("date", target_date.isoformat()).execute()
-    aggregate_rows = resp.data or []
+def _filter_rows(rows: list[dict], query: str) -> list[dict]:
+    if not query:
+        return rows
 
-    live_rows = _rows_from_snapshots(supabase, target_date)
-
-    if target_date == get_ist_today():
-        # Today is still changing; merge with live data to avoid stale/zero aggregates.
-        return _merge_rows(aggregate_rows, live_rows)
-
-    if aggregate_rows:
-        return aggregate_rows
-    return live_rows
-
-
-def _script_uptime_meta() -> tuple[float, str | None]:
-    script_uptime_hrs = 0.0
-    start_time_iso = None
-    if _start_time:
-        elapsed = (datetime.now(timezone.utc) - _start_time).total_seconds()
-        script_uptime_hrs = round(elapsed / 3600, 1)
-        start_time_iso = _start_time.isoformat()
-    return script_uptime_hrs, start_time_iso
-
-
-def _filter_rows(rows: list[dict], q: str) -> list[dict]:
+    q = query.strip().lower()
     if not q:
         return rows
-    ql = q.lower()
+
     return [
         r
         for r in rows
-        if (r.get("user_email") or "").lower().find(ql) >= 0
-        or (r.get("user_name") or "").lower().find(ql) >= 0
+        if q in (r.get("user_email") or "").lower() or q in (r.get("user_name") or "").lower()
     ]
+
+
 def _build_rows(supabase, target_date: date) -> list[dict]:
-    start = datetime.combine(target_date, datetime.min.time(), tzinfo=IST)
-    end = start + timedelta(days=1)
+    daily_rows = _rows_from_daily_uptime(supabase, target_date)
+    live_rows = _rows_from_snapshots(supabase, target_date)
+    return _merge_rows(daily_rows, live_rows)
 
-    resp = supabase.table("daily_uptime").select("*").eq("date", target_date.isoformat()).execute()
-    rows = resp.data or []
-    if rows:
-        return rows
 
-    snap_resp = supabase.table("presence_snapshots").select("*").gte(
-        "polled_at", start.isoformat()
-    ).lt("polled_at", end.isoformat()).execute()
-
-    snapshots = snap_resp.data or []
-    totals = calculate_active_seconds(snapshots, fallback_interval_seconds=POLL_SECONDS)
-    return list(totals.values())
+def _to_api_user(row: dict) -> dict:
+    seconds = int(row.get("total_seconds_online", 0) or 0)
+    return {
+        "email": row.get("user_email"),
+        "name": row.get("user_name"),
+        "total_seconds_online": seconds,
+        "formatted": format_duration_rounded(seconds),
+    }
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index(
+async def dashboard(
     request: Request,
-    q: str = Query(default="", description="Search user by name or email"),
-    d: str = Query(default=None, description="Date (YYYY-MM-DD)"),
+    d: str = Query(default=None),
+    q: str = Query(default=""),
 ):
     target_date = get_ist_today()
     if d:
@@ -161,8 +145,6 @@ async def index(
             target_date = date.fromisoformat(d)
         except ValueError:
             pass
-
-    script_uptime_hrs, start_time_iso = _script_uptime_meta()
 
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         return templates.TemplateResponse(
@@ -173,63 +155,10 @@ async def index(
                 "date": target_date,
                 "search": q,
                 "error": "Supabase not configured",
-                "script_uptime_hrs": script_uptime_hrs,
-                "script_start_time": start_time_iso,
+                "script_uptime_hrs": 0,
+                "script_start_time": None,
             },
         )
-            {
-                "request": request,
-                "users": [],
-                "date": target_date,
-                "search": q,
-                "error": "Supabase not configured",
-                "script_uptime_hrs": round(elapsed / 3600, 1),
-            },
-        )
-
-    rows = _build_rows(get_supabase(), target_date)
-    supabase = get_supabase()
-
-    # Prefer daily_uptime; fallback to computing from presence_snapshots
-    start = datetime.combine(target_date, datetime.min.time(), tzinfo=IST)
-    end = datetime.combine(target_date, datetime.min.time(), tzinfo=IST) + timedelta(days=1)
-    start_str = start.isoformat()
-    end_str = end.isoformat()
-
-    resp = supabase.table("daily_uptime").select("*").eq("date", target_date.isoformat()).execute()
-    rows = resp.data or []
-
-    if not rows:
-        # Compute from presence_snapshots
-        snap_resp = supabase.table("presence_snapshots").select("*").gte(
-            "polled_at", start_str
-        ).lt("polled_at", end_str).execute()
-        snapshots = snap_resp.data or []
-        by_user: dict[str, dict] = {}
-        for s in snapshots:
-            uid = s["user_id"]
-            if uid not in by_user:
-                by_user[uid] = {"user_email": s.get("user_email"), "user_name": s.get("user_name"), "count": 0}
-            if s.get("presence") == "active":
-                by_user[uid]["count"] += 1
-        actual_poll_interval = POLL_SECONDS + (len(by_user) * 3.5) if by_user else POLL_SECONDS
-        rows = [
-            {
-                "user_id": uid,
-                "user_email": data["user_email"],
-                "user_name": data["user_name"],
-                "total_seconds_online": int(data["count"] * actual_poll_interval),
-            }
-            for uid, data in by_user.items()
-        ]
-
-    if q:
-        ql = q.lower()
-        rows = [
-            r for r in rows
-            if (r.get("user_email") or "").lower().find(ql) >= 0
-            or (r.get("user_name") or "").lower().find(ql) >= 0
-        ]
 
     rows = _filter_rows(_build_rows(get_supabase(), target_date), q)
     users = [
@@ -238,20 +167,12 @@ async def index(
             "name": r.get("user_name") or "(no name)",
             "seconds": int(r.get("total_seconds_online", 0) or 0),
             "formatted": format_duration_rounded(int(r.get("total_seconds_online", 0) or 0)),
-            "seconds": r.get("total_seconds_online", 0),
-            "formatted": format_duration_rounded(r.get("total_seconds_online", 0)),
         }
         for r in rows
     ]
     users.sort(key=lambda x: -x["seconds"])
 
-    script_uptime_hrs = 0
-    start_time_iso = None
-    if _start_time:
-        elapsed = (datetime.now(timezone.utc) - _start_time).total_seconds()
-        script_uptime_hrs = round(elapsed / 3600, 1)
-        start_time_iso = _start_time.isoformat()
-
+    script_uptime_hrs, start_time_iso = _script_uptime_meta()
     return templates.TemplateResponse(
         "dashboard.html",
         {
@@ -281,68 +202,12 @@ async def api_uptime(
         return {"error": "Supabase not configured", "users": []}
 
     rows = _filter_rows(_build_rows(get_supabase(), target_date), q)
+    rows.sort(key=lambda r: -int(r.get("total_seconds_online", 0) or 0))
     script_uptime_hrs, start_time_iso = _script_uptime_meta()
-    rows = _build_rows(get_supabase(), target_date)
-    supabase = get_supabase()
-    start = datetime.combine(target_date, datetime.min.time(), tzinfo=IST)
-    end = datetime.combine(target_date, datetime.min.time(), tzinfo=IST) + timedelta(days=1)
-    start_str = start.isoformat()
-    end_str = end.isoformat()
-
-    resp = supabase.table("daily_uptime").select("*").eq("date", target_date.isoformat()).execute()
-    rows = resp.data or []
-
-    if not rows:
-        snap_resp = supabase.table("presence_snapshots").select("*").gte(
-            "polled_at", start_str
-        ).lt("polled_at", end_str).execute()
-        snapshots = snap_resp.data or []
-        by_user = {}
-        for s in snapshots:
-            uid = s["user_id"]
-            if uid not in by_user:
-                by_user[uid] = {"user_email": s.get("user_email"), "user_name": s.get("user_name"), "count": 0}
-            if s.get("presence") == "active":
-                by_user[uid]["count"] += 1
-        actual_poll_interval = POLL_SECONDS + (len(by_user) * 3.5) if by_user else POLL_SECONDS
-        rows = [
-            {
-                "user_id": uid,
-                "user_email": data["user_email"],
-                "user_name": data["user_name"],
-                "total_seconds_online": int(data["count"] * actual_poll_interval),
-            }
-            for uid, data in by_user.items()
-        ]
-
-    if q:
-        ql = q.lower()
-        rows = [
-            r for r in rows
-            if (r.get("user_email") or "").lower().find(ql) >= 0
-            or (r.get("user_name") or "").lower().find(ql) >= 0
-        ]
-
-    script_uptime_hrs = 0
-    start_time_iso = None
-    if _start_time:
-        elapsed = (datetime.now(timezone.utc) - _start_time).total_seconds()
-        script_uptime_hrs = round(elapsed / 3600, 1)
-        start_time_iso = _start_time.isoformat()
 
     return {
         "date": target_date.isoformat(),
         "script_uptime_hrs": script_uptime_hrs,
         "script_start_time": start_time_iso,
-        "users": [
-            {
-                "email": r.get("user_email"),
-                "name": r.get("user_name"),
-                "total_seconds_online": int(r.get("total_seconds_online", 0) or 0),
-                "formatted": format_duration_rounded(int(r.get("total_seconds_online", 0) or 0)),
-                "total_seconds_online": r.get("total_seconds_online", 0),
-                "formatted": format_duration_rounded(r.get("total_seconds_online", 0)),
-            }
-            for r in rows
-        ],
+        "users": [_to_api_user(r) for r in rows],
     }
