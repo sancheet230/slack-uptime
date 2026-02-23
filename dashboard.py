@@ -1,6 +1,7 @@
 """Basic dashboard for Slack user uptime."""
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -13,6 +14,7 @@ from config import POLL_SECONDS, SUPABASE_SERVICE_KEY, SUPABASE_URL
 from uptime import calculate_active_seconds, format_duration_rounded
 
 IST = ZoneInfo("Asia/Kolkata")
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Slack Uptime Dashboard")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -160,17 +162,23 @@ async def dashboard(
             },
         )
 
-    rows = _filter_rows(_build_rows(get_supabase(), target_date), q)
-    users = [
-        {
-            "email": r.get("user_email") or "(no email)",
-            "name": r.get("user_name") or "(no name)",
-            "seconds": int(r.get("total_seconds_online", 0) or 0),
-            "formatted": format_duration_rounded(int(r.get("total_seconds_online", 0) or 0)),
-        }
-        for r in rows
-    ]
-    users.sort(key=lambda x: -x["seconds"])
+    try:
+        rows = _filter_rows(_build_rows(get_supabase(), target_date), q)
+        users = [
+            {
+                "email": r.get("user_email") or "(no email)",
+                "name": r.get("user_name") or "(no name)",
+                "seconds": int(r.get("total_seconds_online", 0) or 0),
+                "formatted": format_duration_rounded(int(r.get("total_seconds_online", 0) or 0)),
+            }
+            for r in rows
+        ]
+        users.sort(key=lambda x: -x["seconds"])
+        error = None
+    except Exception:
+        logger.exception("Failed to build dashboard rows")
+        users = []
+        error = "Failed to load uptime data. Check Supabase/API credentials and logs."
 
     script_uptime_hrs, start_time_iso = _script_uptime_meta()
     return templates.TemplateResponse(
@@ -182,6 +190,7 @@ async def dashboard(
             "search": q,
             "script_uptime_hrs": script_uptime_hrs,
             "script_start_time": start_time_iso,
+            "error": error,
         },
     )
 
@@ -201,8 +210,13 @@ async def api_uptime(
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         return {"error": "Supabase not configured", "users": []}
 
-    rows = _filter_rows(_build_rows(get_supabase(), target_date), q)
-    rows.sort(key=lambda r: -int(r.get("total_seconds_online", 0) or 0))
+    try:
+        rows = _filter_rows(_build_rows(get_supabase(), target_date), q)
+        rows.sort(key=lambda r: -int(r.get("total_seconds_online", 0) or 0))
+    except Exception:
+        logger.exception("Failed to build API uptime rows")
+        return {"error": "Failed to load uptime data", "users": [], "date": target_date.isoformat()}
+
     script_uptime_hrs, start_time_iso = _script_uptime_meta()
 
     return {

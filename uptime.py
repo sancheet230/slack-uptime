@@ -7,11 +7,14 @@ from datetime import datetime
 MAX_GAP_MULTIPLIER = 3
 
 
-def _parse_polled_at(value: str | None) -> datetime | None:
+def _parse_polled_at(value: str | datetime | None) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+
     if not value:
         return None
 
-    normalized = value.replace("Z", "+00:00")
+    normalized = str(value).strip().replace(" ", "T").replace("Z", "+00:00")
     try:
         return datetime.fromisoformat(normalized)
     except ValueError:
@@ -20,14 +23,19 @@ def _parse_polled_at(value: str | None) -> datetime | None:
 
 def _is_online(row: dict) -> bool:
     """Treat `online=True` as active even if text presence is stale."""
-    if row.get("online") is True:
+    online = row.get("online")
+    if isinstance(online, str):
+        online = online.strip().lower() in {"true", "t", "1", "yes", "y", "on"}
+
+    if bool(online):
         return True
-    return row.get("presence") == "active"
+    return str(row.get("presence") or "").strip().lower() == "active"
 
 
 def calculate_active_seconds(
     snapshots: list[dict],
     fallback_interval_seconds: int,
+    include_tail_interval: bool = True,
 ) -> dict[str, dict]:
     """Return per-user totals computed from active durations between snapshots.
 
@@ -43,7 +51,7 @@ def calculate_active_seconds(
 
     totals: dict[str, dict] = {}
     for uid, rows in by_user.items():
-        ordered = sorted(rows, key=lambda r: r.get("polled_at") or "")
+        ordered = sorted(rows, key=lambda r: _parse_polled_at(r.get("polled_at")) or datetime.min)
         total_seconds = 0
 
         for idx, row in enumerate(ordered):
@@ -58,7 +66,7 @@ def calculate_active_seconds(
                 diff = int((next_ts - current_ts).total_seconds())
                 max_allowed = max(1, fallback_interval_seconds) * MAX_GAP_MULTIPLIER
                 total_seconds += max(0, min(diff, max_allowed))
-            else:
+            elif include_tail_interval:
                 total_seconds += max(1, fallback_interval_seconds)
 
         first = ordered[0]

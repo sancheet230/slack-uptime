@@ -3,7 +3,8 @@ Thin Supabase/PostgREST client using HTTP - avoids heavy supabase-py dependencie
 that require pyiceberg (fails to build on Windows/Python 3.14).
 """
 import httpx
-from config import SUPABASE_URL, SUPABASE_SERVICE_KEY
+
+from config import SUPABASE_SERVICE_KEY, SUPABASE_URL
 
 BASE = f"{SUPABASE_URL.rstrip('/')}/rest/v1"
 HEADERS = {
@@ -23,8 +24,8 @@ class SelectBuilder:
 
     def __init__(self, table: str, columns: str = "*"):
         self._table = table
-        self._cols = columns
-        self._params: list[tuple[str, str]] = []
+        self._cols = columns or "*"
+        self._params: list[tuple[str, str]] = [("select", self._cols)]
 
     def eq(self, col: str, val):
         self._params.append((col, f"eq.{val}"))
@@ -53,7 +54,8 @@ class InsertBuilder:
 
     def execute(self):
         with _client() as c:
-            c.post(f"/{self._table}", json=self._row)
+            r = c.post(f"/{self._table}", json=self._row)
+            r.raise_for_status()
 
 
 class UpsertBuilder:
@@ -63,9 +65,10 @@ class UpsertBuilder:
         self._on_conflict = on_conflict
 
     def execute(self):
-        h = {**HEADERS, "Prefer": "resolution=merge-duplicates"}
+        h = {**HEADERS, "Prefer": "resolution=merge-duplicates,return=minimal"}
         with httpx.Client(base_url=BASE, headers=h, timeout=30.0) as c:
-            c.post(f"/{self._table}?on_conflict={self._on_conflict}", json=self._row)
+            r = c.post(f"/{self._table}?on_conflict={self._on_conflict}", json=self._row)
+            r.raise_for_status()
 
 
 class TableClient:

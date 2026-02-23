@@ -207,13 +207,10 @@
                 }
 
                 if (data.date) {
-                    // Update header text based on API response
-                    const dateObj = new Date(data.date);
-                    // Handle timezone offset to ensure exact date displays
-                    const userTimezoneOffset = dateObj.getTimezoneOffset() * 60000;
-                    const accurateDate = new Date(dateObj.getTime() + userTimezoneOffset);
-
-                    const options = { month: 'long', day: 'numeric', year: 'numeric' };
+                    // Avoid timezone shifts by parsing YYYY-MM-DD manually
+                    const [y, m, d] = data.date.split('-').map(Number);
+                    const accurateDate = new Date(Date.UTC(y, m - 1, d));
+                    const options = { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' };
                     document.getElementById('dateDisplay').textContent = accurateDate.toLocaleDateString('en-US', options);
                 }
 
@@ -222,7 +219,14 @@
                     data.users.forEach(u => {
                         const tr = document.createElement('tr');
                         const tdName = document.createElement('td');
-                        tdName.innerHTML = `${u.name || '(no name)'}<br><small style="color:#666">${u.email || '(no email)'}</small>`;
+                        const nameText = document.createTextNode(u.name || '(no name)');
+                        const br = document.createElement('br');
+                        const small = document.createElement('small');
+                        small.style.color = '#666';
+                        small.textContent = u.email || '(no email)';
+                        tdName.appendChild(nameText);
+                        tdName.appendChild(br);
+                        tdName.appendChild(small);
                         const tdTime = document.createElement('td');
                         tdTime.className = 'time';
                         tdTime.textContent = u.formatted;
