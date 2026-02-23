@@ -1,7 +1,7 @@
 """Utilities for converting presence snapshots into uptime durations."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from statistics import median
 
 
@@ -10,14 +10,15 @@ MAX_GAP_MULTIPLIER = 3
 
 def _parse_polled_at(value: str | datetime | None) -> datetime | None:
     if isinstance(value, datetime):
-        return value
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
     if not value:
         return None
 
     normalized = str(value).strip().replace(" ", "T").replace("Z", "+00:00")
     try:
-        return datetime.fromisoformat(normalized)
+        parsed = datetime.fromisoformat(normalized)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
     except ValueError:
         return None
 
@@ -52,7 +53,10 @@ def calculate_active_seconds(
 
     totals: dict[str, dict] = {}
     for uid, rows in by_user.items():
-        ordered = sorted(rows, key=lambda r: _parse_polled_at(r.get("polled_at")) or datetime.min)
+        ordered = sorted(
+            rows,
+            key=lambda r: _parse_polled_at(r.get("polled_at")) or datetime.min.replace(tzinfo=timezone.utc),
+        )
         total_seconds = 0
 
         observed_gaps: list[int] = []
