@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from statistics import median
 
 
 MAX_GAP_MULTIPLIER = 3
@@ -54,6 +55,17 @@ def calculate_active_seconds(
         ordered = sorted(rows, key=lambda r: _parse_polled_at(r.get("polled_at")) or datetime.min)
         total_seconds = 0
 
+        observed_gaps: list[int] = []
+        for idx in range(len(ordered) - 1):
+            current_ts = _parse_polled_at(ordered[idx].get("polled_at"))
+            next_ts = _parse_polled_at(ordered[idx + 1].get("polled_at"))
+            if current_ts and next_ts and next_ts > current_ts:
+                observed_gaps.append(int((next_ts - current_ts).total_seconds()))
+
+        inferred_interval = int(median(observed_gaps)) if observed_gaps else max(1, fallback_interval_seconds)
+        inferred_interval = max(1, inferred_interval)
+        max_allowed_gap = inferred_interval * MAX_GAP_MULTIPLIER
+
         for idx, row in enumerate(ordered):
             if not _is_online(row):
                 continue
@@ -64,10 +76,9 @@ def calculate_active_seconds(
 
             if current_ts and next_ts and next_ts > current_ts:
                 diff = int((next_ts - current_ts).total_seconds())
-                max_allowed = max(1, fallback_interval_seconds) * MAX_GAP_MULTIPLIER
-                total_seconds += max(0, min(diff, max_allowed))
+                total_seconds += max(0, min(diff, max_allowed_gap))
             elif include_tail_interval:
-                total_seconds += max(1, fallback_interval_seconds)
+                total_seconds += inferred_interval
 
         first = ordered[0]
         totals[uid] = {
